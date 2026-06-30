@@ -39,10 +39,6 @@ async def connect_lavalink(bot: commands.Bot) -> None:
 
 
 class MusicPlayer(wavelink.Player):
-    """
-    Custom player class. Since Wavelink natively manages your connection handshakes,
-    we leave internal voice protocol methods completely untouched to prevent multi-node crashes.
-    """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
