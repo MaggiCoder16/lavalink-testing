@@ -5,69 +5,46 @@ from discord import app_commands
 from discord.ext import commands
 import wavelink
 
+LAVALINK_NODES = [
+    {"host": "lavalinkv4.serenetia.com", "port": 443, "password": "https://seretia.link/discord", "secure": True, "identifier": "Serenetia-HTTPS"},
+    {"host": "lavalinkv4.serenetia.com", "port": 80, "password": "https://seretia.link/discord", "secure": False, "identifier": "Serenetia-HTTP"},
+    {"host": "lavalink.jirayu.net", "port": 443, "password": "youshallnotpass", "secure": True, "identifier": "Jirayu-HTTPS"},
+    {"host": "lavalink.jirayu.net", "port": 13592, "password": "youshallnotpass", "secure": False, "identifier": "Jirayu-HTTP"},
+    {"host": "lava-v4.millohost.my.id", "port": 443, "password": "https://discord.gg/mjS5J2K3ep", "secure": True, "identifier": "MilloHost"},
+    {"host": "sg1-nodelink.nyxbot.app", "port": 3000, "password": "nyxbot.app/support", "secure": False, "identifier": "NyxBot-SG1"},
+    {"host": "sg2-nodelink.nyxbot.app", "port": 3000, "password": "nyxbot.app/support", "secure": False, "identifier": "NyxBot-SG2"},
+]
+
 async def connect_lavalink(bot: commands.Bot) -> None:
     if wavelink.Pool.nodes:
         return
 
-    node = wavelink.Node(
-        uri="https://lavalinkv4.serenetia.com:443",
-        password="https://seretia.link/discord",
-    )
+    nodes_to_connect = []
+    for node_data in LAVALINK_NODES:
+        protocol = "https" if node_data["secure"] else "http"
+        uri = f"{protocol}://{node_data['host']}:{node_data['port']}"
+        
+        node = wavelink.Node(
+            uri=uri,
+            password=node_data["password"],
+            identifier=node_data["identifier"]
+        )
+        nodes_to_connect.append(node)
 
     try:
-        await wavelink.Pool.connect(client=bot, nodes=[node])
-        print("Successfully connected to Lavalink server!")
+        await wavelink.Pool.connect(client=bot, nodes=nodes_to_connect)
+        print(f"Successfully connected {len(nodes_to_connect)} nodes to the global Wavelink Pool!")
     except Exception as e:
         print(f"Failed to connect to Lavalink: {e}")
 
+
 class MusicPlayer(wavelink.Player):
-    async def on_voice_state_update(self, data, /) -> None:
-        channel_id = data["channel_id"]
-
-        if not channel_id:
-            if self._connected:
-                await self._destroy()
-            return
-
-        self._connected = True
-        self._voice_state["voice"]["session_id"] = data["session_id"]
-        self._voice_state["channel_id"] = str(channel_id)
-
-        resolved = None
-        if self.guild is not None:
-            resolved = self.guild.get_channel(int(channel_id))
-        if resolved is None:
-            resolved = self.client.get_channel(int(channel_id))  # type: ignore[arg-type]
-        if resolved is not None:
-            self.channel = resolved
-
-    async def _dispatch_voice_update(self) -> None:
-        assert self.guild is not None
-
-        voice = self._voice_state["voice"]
-        session_id = voice.get("session_id")
-        token = voice.get("token")
-        endpoint = voice.get("endpoint")
-        channel_id = self._voice_state.get("channel_id")
-
-        if not session_id or not token or not endpoint or not channel_id:
-            return
-
-        request = {
-            "voice": {
-                "sessionId": session_id,
-                "token": token,
-                "endpoint": endpoint,
-                "channelId": channel_id,
-            }
-        }
-
-        try:
-            await self.node._update_player(self.guild.id, data=request)
-        except wavelink.LavalinkException:
-            await self.disconnect()
-        else:
-            self._connection_event.set()
+    """
+    Custom player class. Since Wavelink natively manages your connection handshakes,
+    we leave internal voice protocol methods completely untouched to prevent multi-node crashes.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
 
 class Music(commands.Cog):
@@ -79,8 +56,7 @@ class Music(commands.Cog):
 
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload):
-        print(f"Lavalink node {payload.node.identifier} is ready!")
-        print(f"Session ID: {payload.session_id}")
+        print(f"Lavalink node '{payload.node.identifier}' is ready! Session ID: {payload.session_id}")
 
     @app_commands.command(
         name="play", description="Play music from YouTube or other sources"
@@ -97,12 +73,11 @@ class Music(commands.Cog):
 
         try:
             channel = interaction.user.voice.channel
+            vc: MusicPlayer = interaction.guild.voice_client
 
-            if not interaction.guild.voice_client:
-                vc: MusicPlayer = await channel.connect(cls=MusicPlayer)
+            if not vc:
+                vc = await channel.connect(cls=MusicPlayer)
                 print(f"Connected to voice channel: {channel.name}")
-            else:
-                vc: wavelink.Player = interaction.guild.voice_client
 
             print(f"Searching for: {query}")
 
@@ -138,7 +113,7 @@ class Music(commands.Cog):
                 inline=True,
             )
             embed.add_field(
-                name="Source", value=track.source.upper(), inline=True
+                name="Source", value=str(track.source).upper(), inline=True
             )
 
             if track.artwork:
@@ -162,7 +137,7 @@ class Music(commands.Cog):
         name="stop", description="Stop playing and disconnect"
     )
     async def stop(self, interaction: discord.Interaction):
-        vc: wavelink.Player = interaction.guild.voice_client
+        vc: MusicPlayer = interaction.guild.voice_client
 
         if not vc:
             await interaction.response.send_message(
@@ -176,7 +151,7 @@ class Music(commands.Cog):
 
     @app_commands.command(name="pause", description="Pause the current track")
     async def pause(self, interaction: discord.Interaction):
-        vc: wavelink.Player = interaction.guild.voice_client
+        vc: MusicPlayer = interaction.guild.voice_client
 
         if not vc or not vc.playing:
             await interaction.response.send_message(
@@ -192,7 +167,7 @@ class Music(commands.Cog):
         name="resume", description="Resume the current track"
     )
     async def resume(self, interaction: discord.Interaction):
-        vc: wavelink.Player = interaction.guild.voice_client
+        vc: MusicPlayer = interaction.guild.voice_client
 
         if not vc or not vc.paused:
             await interaction.response.send_message(
@@ -205,43 +180,48 @@ class Music(commands.Cog):
         print("Resumed playback")
 
     @app_commands.command(
-        name="status", description="Check Lavalink and bot status"
+        name="status", description="Check active Lavalink nodes and status"
     )
     async def status(self, interaction: discord.Interaction):
-        embed = discord.Embed(title="Bot Status", color=discord.Color.blue())
+        embed = discord.Embed(title="Bot & Lavalink Cluster Status", color=discord.Color.blue())
         nodes = wavelink.Pool.nodes
 
-        if nodes and len(nodes) > 0:
-            node = list(nodes.values())[0]
+        if nodes:
+            node_status_list = []
+            for name, node in nodes.items():
+                status_icon = "🟢" if node.status == wavelink.NodeStatus.CONNECTED else "🔴"
+                node_status_list.append(f"{status_icon} **{name}**: Players: {len(node.players)}")
+            
             embed.add_field(
-                name="Lavalink Node",
-                value=f"Connected\nPlayers: {len(node.players)}",
-                inline=True,
+                name="Connected Nodes",
+                value="\n".join(node_status_list),
+                inline=False,
             )
         else:
             embed.add_field(
-                name="Lavalink Node", value="Not connected", inline=True
+                name="Connected Nodes", value="❌ No active nodes in pool", inline=False
             )
 
-        vc: wavelink.Player = interaction.guild.voice_client
+        vc: MusicPlayer = interaction.guild.voice_client
 
         if vc:
             status_text = (
                 f"Channel: {vc.channel.name}\n"
+                f"Assigned Node: **{vc.node.identifier}**\n"
                 f"Playing: {vc.playing}\n"
                 f"Paused: {vc.paused}\n"
             )
 
             if vc.current:
-                status_text += f"\n**Current Track:**\n{vc.current.title}"
+                status_text += f"\n**Track:** {vc.current.title}"
 
             embed.add_field(
-                name="Voice Status", value=status_text, inline=False
+                name="Current Guild Voice Status", value=status_text, inline=False
             )
         else:
             embed.add_field(
-                name="Voice Status",
-                value="Not connected to voice",
+                name="Current Guild Voice Status",
+                value="Not connected to voice in this guild",
                 inline=False,
             )
 
@@ -251,32 +231,19 @@ class Music(commands.Cog):
     async def on_wavelink_track_start(
         self, payload: wavelink.TrackStartEventPayload
     ):
-        """Event fired when a track starts playing"""
         print(f"Track started: {payload.track.title}")
-        print(f"Player: {payload.player}")
 
     @commands.Cog.listener()
     async def on_wavelink_track_end(
         self, payload: wavelink.TrackEndEventPayload
     ):
-        print(f"Track ended: {payload.track.title}")
-        print(f"Reason: {payload.reason}")
-
-        if payload.reason == "loadFailed":
-            print("LOAD FAILED - The track failed to load/play!")
-            print("This usually means:")
-            print("  - Video is geo-blocked or region-restricted")
-            print("  - Video is age-restricted")
-            print("  - Video was deleted or made private")
-            print("  - YouTube client compatibility issue")
+        print(f"Track ended: {payload.track.title} | Reason: {payload.reason}")
 
     @commands.Cog.listener()
     async def on_wavelink_track_exception(
         self, payload: wavelink.TrackExceptionEventPayload
     ):
-        print(f"Track exception: {payload.track.title}")
-        print(f"Error: {payload.exception}")
-        print(f"Details: {payload}")
+        print(f"Track exception: {payload.track.title} | Error: {payload.exception}")
 
 
 async def setup(bot: commands.Bot):
